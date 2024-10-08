@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-reader
+  namespace: test-ns
+  
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-reader
+  template:
+    metadata:
+      labels:
+        app: log-reader
+    spec:
+      containers:
+      - name: log-reader
+        image: jangirjs/random-log-printer:v0.1
+        env:
+        - name: FILE_LOCATION
+          value: "loghub/HDFS/HDFS_2k.log"
+        - name: N_LINES
+          value: "20"  # Example value for N
+        - name: SLEEP_TIME
+          value: "10"
+        - name: GITHUB_URL
+          value: "https://github.com/logpai/loghub"
+
