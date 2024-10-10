@@ -31,6 +31,28 @@ def get_postgres_connection():
         print(f"Error connecting to PostgreSQL: {e}")
         return None
 
+# Function to get the last stored timestamp for a specific namespace, pod, and container
+def get_last_stored_time(namespace, pod_name, container_name):
+    conn = get_postgres_connection()
+    if conn is None:
+        return None
+    
+    try:
+        cur = conn.cursor()
+        select_query = """
+        SELECT MAX(timestamp) FROM log_metrics 
+        WHERE namespace = %s AND pod = %s AND container = %s;
+        """
+        cur.execute(select_query, (namespace, pod_name, container_name))
+        last_stored_time = cur.fetchone()[0]
+        cur.close()
+        return last_stored_time
+    except psycopg2.Error as e:
+        print(f"Error fetching last stored time from PostgreSQL: {e}")
+        return None
+    finally:
+        conn.close()
+
 # Function to get logs from a container
 def get_logs(namespace, pod_name, container_name, since_seconds):
     try:
@@ -51,7 +73,7 @@ def count_log_lines(log_lines):
     non_error_count = 0
     
     for line in log_lines:
-        if "warn" in line.lower():
+        if any(error_word in line.lower() for error_word in ["warn", "error", "fatal"]):
             error_count += 1
         else:
             non_error_count += 1
@@ -95,31 +117,45 @@ def store_time_series_data(namespace, pod_name, container_name, timestamp, error
     finally:
         conn.close()
 
-# Main function to monitor logs and count "error" occurrences every minute
+# Main function to monitor logs and count "error" occurrences
 def monitor_pods():
-    namespace = "test-ns"  # Set your desired namespace
+    # Get the namespaces from environment variable
+    namespaces = os.getenv('NAMESPACE', 'default').split(",")
+    
     while True:
-        pods = v1.list_namespaced_pod(namespace)
-        
-        for pod in pods.items:
-            pod_name = pod.metadata.name
-            for container in pod.spec.containers:
-                container_name = container.name
-                current_time = datetime.datetime.now(timezone.utc)
-                since_time = current_time - datetime.timedelta(minutes=1)
-                
-                # Calculate the time difference in seconds
-                since_seconds = int((current_time - since_time).total_seconds())
-                
-                # Get logs from the last minute
-                logs = get_logs(namespace, pod_name, container_name, since_seconds)
-                error_count, non_error_count = count_log_lines(logs)
-                
-                # Store the count in PostgreSQL
-                store_time_series_data(
-                    namespace, pod_name, container_name, current_time.isoformat(),
-                    error_count, non_error_count
-                )
+        for namespace in namespaces:
+            namespace = namespace.strip()  # Strip any extra whitespace
+            print(f"Monitoring namespace: {namespace}")
+            
+            pods = v1.list_namespaced_pod(namespace)
+            
+            for pod in pods.items:
+                pod_name = pod.metadata.name
+                for container in pod.spec.containers:
+                    container_name = container.name
+                    current_time = datetime.datetime.now(timezone.utc)
+                    
+                    # Get the last stored timestamp from the database
+                    last_stored_time = get_last_stored_time(namespace, pod_name, container_name)
+                    
+                    if last_stored_time:
+                        since_time = last_stored_time
+                    else:
+                        # If no last stored time, fetch all logs
+                        since_time = current_time - datetime.timedelta(days=365)  # 1 year, adjust if needed
+                    
+                    since_seconds = int((current_time - since_time).total_seconds())
+                    
+                    # Get logs since the last stored time (or all logs if no timestamp found)
+                    logs = get_logs(namespace, pod_name, container_name, since_seconds)
+                    
+                    error_count, non_error_count = count_log_lines(logs)
+                    
+                    # Store the count in PostgreSQL
+                    store_time_series_data(
+                        namespace, pod_name, container_name, current_time.isoformat(),
+                        error_count, non_error_count
+                    )
         
         time.sleep(60)  # Sleep for 1 minute before next iteration
 
